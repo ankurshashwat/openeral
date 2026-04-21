@@ -31,6 +31,9 @@ fi
 # Workspace ID defaults to sandbox ID (set by OpenShell supervisor)
 export WORKSPACE_ID="${OPENSHELL_SANDBOX_ID:-default}"
 
+# Agent kind — set by the CLI or environment (default: claude)
+export OPENERAL_AGENT="${OPENERAL_AGENT:-claude}"
+
 # Fix the PGlite data directory to a stable path so every Node.js process
 # in this script uses the same embedded database.  /home/agent is a real
 # directory in the container (created in the Dockerfile).
@@ -41,9 +44,8 @@ mkdir -p "$OPENERAL_DATA_DIR"
 # getDatabaseConnection() picks it up over PGlite.
 export DATABASE_URL="${DATABASE_URL:-${OPENERAL_DATABASE_URL:-}}"
 
-# StringCost integration — write proxy config into Claude Code settings.json so it
-# takes effect regardless of how the sandbox injects environment variables.
-if [ -n "${STRINGCOST_PROXY_URL:-}" ]; then
+# StringCost integration — Claude Code only
+if [ "$OPENERAL_AGENT" != "openclaw" ] && [ -n "${STRINGCOST_PROXY_URL:-}" ]; then
   echo "setup.sh: writing StringCost proxy to ~/.claude/settings.json..."
   node -e "
 const fs = require('fs');
@@ -86,45 +88,53 @@ node -e "
       );
     } catch {}
 
-    // Seed root, .claude dirs, and default security settings
-    const defaultSettings = JSON.stringify({
-      permissions: {
-        allow: [
-          \"Bash(npm run *)\",
-          \"Bash(npm test *)\",
-          \"Bash(git status)\",
-          \"Bash(git diff *)\",
-          \"Bash(git log *)\",
-          \"Bash(git commit *)\",
-          \"Bash(ls *)\",
-          \"Bash(cat *)\",
-          \"Bash(grep *)\"
-        ],
-        deny: [
-          \"Read(~/.ssh/**)\",
-          \"Read(~/.aws/**)\",
-          \"Read(~/.azure/**)\",
-          \"Read(~/.npmrc)\",
-          \"Read(~/.git-credentials)\",
-          \"Edit(~/.bashrc)\",
-          \"Edit(~/.zshrc)\",
-          \"Bash(curl *)\",
-          \"Bash(wget *)\",
-          \"Bash(nc *)\",
-          \"Bash(ssh *)\",
-          \"Bash(git push *)\",
-          \"Read(*.env)\",
-          \"Read(.env.*)\"
-        ]
-      },
-      enableAllProjectMcpServers: false
-    }, null, 2);
+    // Seed directories and files — agent-specific
+    const agentKind = process.env.OPENERAL_AGENT || 'claude';
+    let autoDirs, seedFiles;
+
+    if (agentKind === 'openclaw') {
+      autoDirs = ['/', '/.config'];
+      seedFiles = {};
+    } else {
+      const defaultSettings = JSON.stringify({
+        permissions: {
+          allow: [
+            \"Bash(npm run *)\",
+            \"Bash(npm test *)\",
+            \"Bash(git status)\",
+            \"Bash(git diff *)\",
+            \"Bash(git log *)\",
+            \"Bash(git commit *)\",
+            \"Bash(ls *)\",
+            \"Bash(cat *)\",
+            \"Bash(grep *)\"
+          ],
+          deny: [
+            \"Read(~/.ssh/**)\",
+            \"Read(~/.aws/**)\",
+            \"Read(~/.azure/**)\",
+            \"Read(~/.npmrc)\",
+            \"Read(~/.git-credentials)\",
+            \"Edit(~/.bashrc)\",
+            \"Edit(~/.zshrc)\",
+            \"Bash(curl *)\",
+            \"Bash(wget *)\",
+            \"Bash(nc *)\",
+            \"Bash(ssh *)\",
+            \"Bash(git push *)\",
+            \"Read(*.env)\",
+            \"Read(.env.*)\"
+          ]
+        },
+        enableAllProjectMcpServers: false
+      }, null, 2);
+      autoDirs = ['/', '/.claude', '/.claude/projects'];
+      seedFiles = { '/.claude/settings.json': defaultSettings };
+    }
 
     await ws.seedFromConfig(pool, process.env.WORKSPACE_ID, {
-      autoDirs: ['/', '/.claude', '/.claude/projects'],
-      seedFiles: {
-        '/.claude/settings.json': defaultSettings
-      },
+      autoDirs: autoDirs,
+      seedFiles: seedFiles,
     });
 
     await pool.end();
@@ -175,27 +185,49 @@ else
   trap "rm -f /tmp/openeral-bash.sock" EXIT
 fi
 
-# Install Claude Code if not already present in the image
-if ! command -v claude >/dev/null 2>&1; then
-  echo "setup.sh: Claude CLI not found, installing..."
-  npm install -g @anthropic-ai/claude-code 2>&1 | tail -10
-  if ! command -v claude >/dev/null 2>&1; then
-    echo "setup.sh: ERROR: Claude CLI install failed" >&2
-    exit 1
-  fi
-  echo "setup.sh: Claude CLI installed"
-fi
+# --- Agent-specific install and launch ---
+OPENERAL_AGENT="${OPENERAL_AGENT:-claude}"
 
-# Launch Claude Code with persistent home
-echo "setup.sh: launching Claude Code..."
-if [ -n "${STRINGCOST_PROXY_URL:-}" ]; then
-  exec env -u ANTHROPIC_API_KEY \
-    HOME=/home/agent \
-    SHELL=/usr/local/bin/openeral-bash \
-    claude "$@"
-else
+if [ "$OPENERAL_AGENT" = "openclaw" ]; then
+  # OpenClaw is baked into the sandbox image (see sandboxes/openeral/Dockerfile).
+  # This block is a fallback for stale images — if you hit it, rebuild the image.
+  if ! command -v openclaw >/dev/null 2>&1; then
+    echo "setup.sh: OpenClaw not found in image — falling back to runtime install (slow)..." >&2
+    git config --global url."https://github.com/".insteadOf "ssh://git@github.com/"
+    git config --global --add url."https://github.com/".insteadOf "git@github.com:"
+    git config --global http.sslVerify false
+    SHARP_IGNORE_GLOBAL_LIBVIPS=1 npm install -g --loglevel=error openclaw@latest 2>&1 | tail -40
+    if ! command -v openclaw >/dev/null 2>&1; then
+      echo "setup.sh: ERROR: OpenClaw install failed" >&2
+      exit 1
+    fi
+  fi
+  echo "setup.sh: launching OpenClaw..."
   exec env \
     HOME=/home/agent \
     SHELL=/usr/local/bin/openeral-bash \
-    claude "$@"
+    PATH="$PATH" \
+    openclaw "$@"
+else
+  if ! command -v claude >/dev/null 2>&1; then
+    echo "setup.sh: Claude CLI not found, installing..."
+    npm install -g @anthropic-ai/claude-code 2>&1 | tail -10
+    if ! command -v claude >/dev/null 2>&1; then
+      echo "setup.sh: ERROR: Claude CLI install failed" >&2
+      exit 1
+    fi
+    echo "setup.sh: Claude CLI installed"
+  fi
+  echo "setup.sh: launching Claude Code..."
+  if [ -n "${STRINGCOST_PROXY_URL:-}" ]; then
+    exec env -u ANTHROPIC_API_KEY \
+      HOME=/home/agent \
+      SHELL=/usr/local/bin/openeral-bash \
+      claude "$@"
+  else
+    exec env \
+      HOME=/home/agent \
+      SHELL=/usr/local/bin/openeral-bash \
+      claude "$@"
+  fi
 fi

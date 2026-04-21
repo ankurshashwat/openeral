@@ -133,23 +133,58 @@ describe('CLI argument parsing', () => {
     });
   });
 
-  it('keeps launch mode compatible with Claude args after --', () => {
+  it('keeps launch mode compatible with agent args after --', () => {
     const parsed = parseCliArgs(['--workspace', 'alpha', '--', '-p', 'hello']);
 
     expect(parsed).toEqual({
       kind: 'launch',
       workspaceId: 'alpha',
-      claudeArgs: ['-p', 'hello'],
+      agent: 'claude',
+      agentArgs: ['-p', 'hello'],
     });
   });
 
-  it('treats --help after -- as a Claude arg, not OpenEral help', () => {
+  it('treats --help after -- as an agent arg, not OpenEral help', () => {
     const parsed = parseCliArgs(['--', '--help']);
 
     expect(parsed).toEqual({
       kind: 'launch',
       workspaceId: 'openeral-claude',
-      claudeArgs: ['--help'],
+      agent: 'claude',
+      agentArgs: ['--help'],
+    });
+  });
+
+  it('parses --agent openclaw with default workspace', () => {
+    const parsed = parseCliArgs(['--agent', 'openclaw']);
+
+    expect(parsed).toEqual({
+      kind: 'launch',
+      workspaceId: 'openeral-openclaw',
+      agent: 'openclaw',
+      agentArgs: [],
+    });
+  });
+
+  it('parses --agent openclaw with explicit workspace', () => {
+    const parsed = parseCliArgs(['--agent', 'openclaw', '--workspace', 'my-ws', '--', '--verbose']);
+
+    expect(parsed).toEqual({
+      kind: 'launch',
+      workspaceId: 'my-ws',
+      agent: 'openclaw',
+      agentArgs: ['--verbose'],
+    });
+  });
+
+  it('defaults to agent claude when --agent is not specified', () => {
+    const parsed = parseCliArgs([]);
+
+    expect(parsed).toEqual({
+      kind: 'launch',
+      workspaceId: 'openeral-claude',
+      agent: 'claude',
+      agentArgs: [],
     });
   });
 });

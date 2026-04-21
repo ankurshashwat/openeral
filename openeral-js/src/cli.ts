@@ -132,8 +132,10 @@ async function createPresignUrl(anthropicKey: string, stringcostKey: string): Pr
 }
 
 
-type ParsedArgs = 
-  | { kind: 'launch'; workspaceId: string; claudeArgs: string[] }
+type AgentKind = 'claude' | 'openclaw';
+
+type ParsedArgs =
+  | { kind: 'launch'; workspaceId: string; agent: AgentKind; agentArgs: string[] }
   | { kind: 'memory-refresh'; workspaceId: string; projectRoot: string; query: string; dryRun: boolean; backup: boolean }
   | { kind: 'help' };
 
@@ -183,36 +185,54 @@ export function parseCliArgs(args: string[]): ParsedArgs {
   }
 
   // Default: launch mode
-  let workspaceId = process.env.OPENERAL_WORKSPACE_ID || 'openeral-claude';
-  let claudeArgs: string[] = [];
+  let agent: AgentKind = 'claude';
+  let agentArgs: string[] = [];
 
   const dashIdx = args.indexOf('--');
   const ownArgs = dashIdx >= 0 ? args.slice(0, dashIdx) : args;
-  claudeArgs = dashIdx >= 0 ? args.slice(dashIdx + 1) : [];
+  agentArgs = dashIdx >= 0 ? args.slice(dashIdx + 1) : [];
+
+  let workspaceId = '';
+  let explicitWorkspace = false;
 
   for (let i = 0; i < ownArgs.length; i++) {
     if ((ownArgs[i] === '--workspace' || ownArgs[i] === '-w') && ownArgs[i + 1]) {
       workspaceId = ownArgs[++i];
+      explicitWorkspace = true;
+    } else if (ownArgs[i] === '--agent' && ownArgs[i + 1]) {
+      const val = ownArgs[++i];
+      if (val === 'claude' || val === 'openclaw') {
+        agent = val;
+      } else {
+        process.stderr.write(`\x1b[31merror: unknown agent "${val}". Supported agents: claude, openclaw\x1b[0m\n`);
+        process.exit(1);
+      }
     }
+  }
+
+  // Default workspace ID depends on agent
+  if (!explicitWorkspace) {
+    workspaceId = process.env.OPENERAL_WORKSPACE_ID || (agent === 'openclaw' ? 'openeral-openclaw' : 'openeral-claude');
   }
 
   // Normalize workspace ID to be Kubernetes-compliant (lowercase, alphanumeric + hyphens)
   const originalId = workspaceId;
   workspaceId = workspaceId.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/^-+|-+$/g, '').replace(/-{2,}/g, '-');
-  
+
   // Prevent empty workspace ID
   if (workspaceId.length === 0) {
-    workspaceId = 'openeral-claude';
+    workspaceId = agent === 'openclaw' ? 'openeral-openclaw' : 'openeral-claude';
     process.stderr.write(`\x1b[33mwarning: workspace ID "${originalId}" normalized to empty string, using default: ${workspaceId}\x1b[0m\n`);
   }
 
-  return { kind: 'launch', workspaceId, claudeArgs };
+  return { kind: 'launch', workspaceId, agent, agentArgs };
 }
 
 function printHelp(): void {
   console.log(`Usage:
-  openeral [options] [-- claude-args]    Launch Claude Code (published image)
-  openeral --dev [options] [-- args]     Launch Claude Code (local dev image)
+  openeral [options] [-- agent-args]     Launch an agent (default: Claude Code)
+  openeral --agent openclaw [-- args]    Launch OpenClaw
+  openeral --dev [options] [-- args]     Launch agent (local dev image)
   openeral presign                        Show the current StringCost presign
   openeral presign renew                  Create and store a new StringCost presign
   openeral stats [options]                Show API usage statistics
@@ -221,7 +241,8 @@ function printHelp(): void {
   openeral memory refresh [options]       Refresh memory system
 
 Launch Options:
-  --workspace, -w <id>    Workspace ID (default: openeral-claude)
+  --agent <name>          Agent to run: claude (default) or openclaw
+  --workspace, -w <id>    Workspace ID (default: openeral-claude or openeral-openclaw)
   --dev, -d               Use local dev image instead of published image
   --help, -h              Show this help
 
@@ -240,13 +261,18 @@ Memory Refresh Options:
   --dry-run               Preview changes without applying
   --no-backup             Skip backup creation
 
-Auth (presign-first model):
+Auth — Claude Code (presign-first model):
   If ~/.config/openeral/presign.json exists, no env vars are required.
   If the presign file is absent, both of these are required on first run:
     ANTHROPIC_API_KEY        Your Anthropic API key (sk-ant-...)
     STRINGCOST_API_KEY       Your StringCost API key
   The presign is created once and stored permanently — subsequent runs need no keys.
   Run \`npx openeral presign renew\` to replace the stored presign at any time.
+
+Auth — OpenClaw (direct API keys):
+  Set at least one LLM API key:
+    ANTHROPIC_API_KEY        For Anthropic models (sk-ant-...)
+    OPENAI_API_KEY           For OpenAI models (sk-...)
 
 Optional env:
   DATABASE_URL             Database connection string (uses PGlite if not provided)
@@ -1316,7 +1342,7 @@ async function cmdPresignRenew(): Promise<void> {
  *      setup.sh runs migrations, seeds the workspace, starts the
  *      openeral-bash daemon, then execs `claude`.
  */
-async function launchViaSandbox(workspaceId: string, claudeArgs: string[], devMode = false): Promise<void> {
+async function launchViaSandbox(workspaceId: string, agentArgs: string[], devMode = false, agent: AgentKind = 'claude'): Promise<void> {
   const sandboxImage = devMode
     ? (process.env.OPENERAL_DEV_IMAGE ?? 'openeral-sandbox:dev')
     : (process.env.OPENERAL_SANDBOX_IMAGE ?? 'ghcr.io/sandys/openeral/sandbox:just-bash');
@@ -1548,42 +1574,60 @@ async function launchViaSandbox(workspaceId: string, claudeArgs: string[], devMo
   // Check if sandbox already exists and delete it
   await cleanupExistingSandbox(workspaceId);
 
-  // Presign-first auth model:
-  //   - Stored presign present → use it; ANTHROPIC_API_KEY and STRINGCOST_API_KEY are not needed.
-  //   - No stored presign       → require both keys to create one now, then store it.
-  // Run `npx openeral presign renew` to replace the stored presign at any time.
+  // Auth model depends on agent:
+  //   - Claude: presign-first via StringCost (API key stripped from sandbox)
+  //   - OpenClaw: direct API keys passed via providers (no presign)
   let stringcostUrl: string | undefined;
   const storedPresign = loadStoredPresign();
-  if (storedPresign) {
-    // Reuse the stored permanent presign — no env vars required
-    stringcostUrl = storedPresign.url.replace(/\/v1\/.*$/, '');
-    process.stderr.write('\x1b[32m✓ Using stored StringCost presign\x1b[0m\n');
-    process.stderr.write(`\x1b[2m  Proxy URL: ${stringcostUrl}\x1b[0m\n`);
-  } else {
-    // No stored presign — both keys are required to create one
-    const anthropicKey = (process.env.ANTHROPIC_API_KEY ?? '').replace('@anthropic_api_key', '').trim();
-    const stringcostKey = (process.env.STRINGCOST_API_KEY ?? '').replace('@stringcost_api_key', '').trim();
 
-    if (!anthropicKey || !stringcostKey) {
-      process.stderr.write(
-        '\x1b[31merror: no stored presign found and required keys are missing.\x1b[0m\n' +
-        'Either run `npx openeral presign renew` once (requires both keys), or set:\n' +
-        '  ANTHROPIC_API_KEY=sk-ant-...   your Anthropic API key\n' +
-        '  STRINGCOST_API_KEY=...          your StringCost API key\n' +
-        'Once created, the presign is stored permanently and no keys are needed again.\n',
-      );
-      process.exit(1);
+  if (agent === 'claude') {
+    // Presign-first auth model:
+    //   - Stored presign present → use it; ANTHROPIC_API_KEY and STRINGCOST_API_KEY are not needed.
+    //   - No stored presign       → require both keys to create one now, then store it.
+    // Run `npx openeral presign renew` to replace the stored presign at any time.
+    if (storedPresign) {
+      // Reuse the stored permanent presign — no env vars required
+      stringcostUrl = storedPresign.url.replace(/\/v1\/.*$/, '');
+      process.stderr.write('\x1b[32m✓ Using stored StringCost presign\x1b[0m\n');
+      process.stderr.write(`\x1b[2m  Proxy URL: ${stringcostUrl}\x1b[0m\n`);
+    } else {
+      // No stored presign — both keys are required to create one
+      const anthropicKey = (process.env.ANTHROPIC_API_KEY ?? '').replace('@anthropic_api_key', '').trim();
+      const stringcostKey = (process.env.STRINGCOST_API_KEY ?? '').replace('@stringcost_api_key', '').trim();
+
+      if (!anthropicKey || !stringcostKey) {
+        process.stderr.write(
+          '\x1b[31merror: no stored presign found and required keys are missing.\x1b[0m\n' +
+          'Either run `npx openeral presign renew` once (requires both keys), or set:\n' +
+          '  ANTHROPIC_API_KEY=sk-ant-...   your Anthropic API key\n' +
+          '  STRINGCOST_API_KEY=...          your StringCost API key\n' +
+          'Once created, the presign is stored permanently and no keys are needed again.\n',
+        );
+        process.exit(1);
+      }
+
+      process.stderr.write('\x1b[2mopeneral: no stored presign — creating permanent presign...\x1b[0m\n');
+      try {
+        const fullUrl = await createPresignUrl(anthropicKey, stringcostKey);
+        saveStoredPresign(fullUrl, stringcostKey);
+        stringcostUrl = fullUrl.replace(/\/v1\/.*$/, '');
+        process.stderr.write('\x1b[32m✓ StringCost presign created and stored (expires_in=-1, max_uses=-1, cost_limit=$10)\x1b[0m\n');
+      } catch (err) {
+        const error = err instanceof Error ? err : new Error(String(err));
+        process.stderr.write('\x1b[31merror: failed to create StringCost presign: ' + error.message + '\x1b[0m\n');
+        process.exit(1);
+      }
     }
-
-    process.stderr.write('\x1b[2mopeneral: no stored presign — creating permanent presign...\x1b[0m\n');
-    try {
-      const fullUrl = await createPresignUrl(anthropicKey, stringcostKey);
-      saveStoredPresign(fullUrl, stringcostKey);
-      stringcostUrl = fullUrl.replace(/\/v1\/.*$/, '');
-      process.stderr.write('\x1b[32m✓ StringCost presign created and stored (expires_in=-1, max_uses=-1, cost_limit=$10)\x1b[0m\n');
-    } catch (err) {
-      const error = err instanceof Error ? err : new Error(String(err));
-      process.stderr.write('\x1b[31merror: failed to create StringCost presign: ' + error.message + '\x1b[0m\n');
+  } else {
+    // OpenClaw: check for at least one LLM API key
+    const hasAnyKey = (process.env.ANTHROPIC_API_KEY ?? '').trim() || (process.env.OPENAI_API_KEY ?? '').trim();
+    if (!hasAnyKey) {
+      process.stderr.write(
+        '\x1b[31merror: no LLM API key found for OpenClaw.\x1b[0m\n' +
+        'Set at least one of:\n' +
+        '  ANTHROPIC_API_KEY=sk-ant-...   for Anthropic models\n' +
+        '  OPENAI_API_KEY=sk-...          for OpenAI models\n',
+      );
       process.exit(1);
     }
   }
@@ -1593,18 +1637,23 @@ async function launchViaSandbox(workspaceId: string, claudeArgs: string[], devMo
   //          setup.sh uses as the workspace ID.
   // --auto-providers  creates/resolves named providers automatically from
   //          the current environment (DATABASE_URL → db).
-  // When a presign is in use we do NOT include --provider claude: the sandbox
-  // authenticates via the presign URL written to ~/.claude/settings.json and
-  // must never see ANTHROPIC_API_KEY.
   const sandboxArgs: string[] = [
     'sandbox', 'create',
     '--name', workspaceId,
     '--from', sandboxImage,
   ];
 
-  if (!stringcostUrl && process.env.ANTHROPIC_API_KEY) {
-    // Fallback (no presign): inject the raw API key via the claude provider
-    sandboxArgs.push('--provider', 'claude');
+  if (agent === 'claude') {
+    // When a presign is in use we do NOT include --provider claude: the sandbox
+    // authenticates via the presign URL written to ~/.claude/settings.json and
+    // must never see ANTHROPIC_API_KEY.
+    if (!stringcostUrl && process.env.ANTHROPIC_API_KEY) {
+      sandboxArgs.push('--provider', 'claude');
+    }
+  } else {
+    // OpenClaw: inject LLM API keys directly via providers
+    if (process.env.ANTHROPIC_API_KEY) sandboxArgs.push('--provider', 'anthropic');
+    if (process.env.OPENAI_API_KEY) sandboxArgs.push('--provider', 'openai');
   }
 
   if (process.env.DATABASE_URL) {
@@ -1613,32 +1662,45 @@ async function launchViaSandbox(workspaceId: string, claudeArgs: string[], devMo
 
   sandboxArgs.push('--auto-providers');
 
-  // Resolve the StringCost API key for org skills download.
-  // Priority: env var > key stored alongside presign.
-  // If the env var is set and differs from the stored key, update the stored copy
-  // so future launches download skills automatically without the env var.
-  const envSkillsKey = (process.env.STRINGCOST_API_KEY ?? '').replace('@stringcost_api_key', '').trim();
-  const storedSkillsKey = storedPresign?.stringcostApiKey?.trim() ?? '';
-  const stringcostKeyForSkills = envSkillsKey || storedSkillsKey;
-
-  if (envSkillsKey && storedPresign && envSkillsKey !== storedSkillsKey) {
-    saveStoredPresign(storedPresign.url, envSkillsKey);
-    process.stderr.write('\x1b[2mopeneral: stored StringCost API key updated from env\x1b[0m\n');
+  // Force PTY allocation. openshell's auto-detection of "is stdin a TTY"
+  // doesn't survive the `bash -c '...' -- <agent args>` wrapper we build
+  // below, so interactive TUIs (OpenClaw's onboarding, Claude's pickers)
+  // render output but can't receive keystrokes. Always pass --tty here;
+  // callers running truly non-interactively (CI, pipes) can set
+  // OPENERAL_NO_TTY=1 to opt out.
+  if (process.env.OPENERAL_NO_TTY === '1') {
+    sandboxArgs.push('--no-tty');
+  } else {
+    sandboxArgs.push('--tty');
   }
 
-  // Fetch org skills on the host and embed them as a base64 payload in the
-  // setup script.  The sandbox never sees the API key — only the already-
-  // downloaded bundle (base64-encoded JSON) is passed in.
+  // Org skills download — Claude Code only (OpenClaw has its own skill system)
   let skillsBase64 = '';
-  if (stringcostKeyForSkills) {
-    process.stderr.write('\x1b[2mopeneral: downloading org skills...\x1b[0m\n');
-    try {
-      const skills = await fetchOrgSkills(stringcostKeyForSkills);
-      skillsBase64 = Buffer.from(JSON.stringify(skills)).toString('base64');
-      process.stderr.write(`\x1b[32m✓ Downloaded ${skills.length} org skill${skills.length !== 1 ? 's' : ''}\x1b[0m\n`);
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      process.stderr.write(`\x1b[33mwarn: org skills download failed: ${msg} — continuing without org skills\x1b[0m\n`);
+  if (agent === 'claude') {
+    // Resolve the StringCost API key for org skills download.
+    // Priority: env var > key stored alongside presign.
+    const envSkillsKey = (process.env.STRINGCOST_API_KEY ?? '').replace('@stringcost_api_key', '').trim();
+    const storedSkillsKey = storedPresign?.stringcostApiKey?.trim() ?? '';
+    const stringcostKeyForSkills = envSkillsKey || storedSkillsKey;
+
+    if (envSkillsKey && storedPresign && envSkillsKey !== storedSkillsKey) {
+      saveStoredPresign(storedPresign.url, envSkillsKey);
+      process.stderr.write('\x1b[2mopeneral: stored StringCost API key updated from env\x1b[0m\n');
+    }
+
+    // Fetch org skills on the host and embed them as a base64 payload in the
+    // setup script.  The sandbox never sees the API key — only the already-
+    // downloaded bundle (base64-encoded JSON) is passed in.
+    if (stringcostKeyForSkills) {
+      process.stderr.write('\x1b[2mopeneral: downloading org skills...\x1b[0m\n');
+      try {
+        const skills = await fetchOrgSkills(stringcostKeyForSkills);
+        skillsBase64 = Buffer.from(JSON.stringify(skills)).toString('base64');
+        process.stderr.write(`\x1b[32m✓ Downloaded ${skills.length} org skill${skills.length !== 1 ? 's' : ''}\x1b[0m\n`);
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        process.stderr.write(`\x1b[33mwarn: org skills download failed: ${msg} — continuing without org skills\x1b[0m\n`);
+      }
     }
   }
 
@@ -1682,7 +1744,12 @@ if [ -n "\${STRINGCOST_PROXY_URL:-}" ]; then
   echo "setup: using StringCost proxy at \${ANTHROPIC_BASE_URL}"
 fi
 
-mkdir -p /home/agent/.claude /home/agent/.claude/projects /home/agent/.openeral/data
+export OPENERAL_AGENT="${agent}"
+if [ "$OPENERAL_AGENT" = "openclaw" ]; then
+  mkdir -p /home/agent/.config /home/agent/.openeral/data
+else
+  mkdir -p /home/agent/.claude /home/agent/.claude/projects /home/agent/.openeral/data
+fi
 
 ${skillsBase64 ? `# Write org skills downloaded from StringCost (base64-encoded JSON bundle)
 node -e "
@@ -1728,8 +1795,11 @@ if [ -n "\${DATABASE_URL:-}" ]; then
           [process.env.WORKSPACE_ID, 'sandbox']
         );
       } catch {}
+      var autoDirs = process.env.OPENERAL_AGENT === 'openclaw'
+        ? ['/', '/.config']
+        : ['/', '/.claude', '/.claude/projects'];
       await ws.seedFromConfig(pool, process.env.WORKSPACE_ID, {
-        autoDirs: ['/', '/.claude', '/.claude/projects'],
+        autoDirs: autoDirs,
         seedFiles: {},
       });
       await pool.end();
@@ -1740,12 +1810,48 @@ if [ -n "\${DATABASE_URL:-}" ]; then
     });
   "
 else
-  echo "setup: no DATABASE_URL — running in local-only mode (no persistence)"
+  echo "setup: no DATABASE_URL — running in local-only mode (PGlite)"
+  echo "setup: running migrations on embedded PGlite..."
+  node -e "
+    import('$OPENERAL_DIR/dist/db/embedded.js').then(async ({ getDatabaseConnection }) => {
+      const { runMigrations } = await import('$OPENERAL_DIR/dist/db/migrations.js');
+      const { pool } = await getDatabaseConnection();
+      await runMigrations(pool);
+      console.log('setup: PGlite migrations complete');
+    }).catch(err => {
+      console.error('setup: PGlite migration failed:', err.message);
+      process.exit(1);
+    });
+  "
+
+  echo "setup: seeding workspace \$WORKSPACE_ID on PGlite..."
+  node -e "
+    import('$OPENERAL_DIR/dist/db/embedded.js').then(async ({ getDatabaseConnection }) => {
+      const ws = await import('$OPENERAL_DIR/dist/db/workspace-queries.js');
+      const { pool } = await getDatabaseConnection();
+      try {
+        await pool.query(
+          \\"INSERT INTO _openeral.workspace_config (id, display_name, config) VALUES (\\\\$1, \\\\$2, '{}'::jsonb) ON CONFLICT (id) DO NOTHING\\",
+          [process.env.WORKSPACE_ID, 'sandbox']
+        );
+      } catch {}
+      var autoDirs = process.env.OPENERAL_AGENT === 'openclaw'
+        ? ['/', '/.config']
+        : ['/', '/.claude', '/.claude/projects'];
+      await ws.seedFromConfig(pool, process.env.WORKSPACE_ID, {
+        autoDirs: autoDirs,
+        seedFiles: {},
+      });
+      console.log('setup: PGlite workspace seeded');
+    }).catch(err => {
+      console.error('setup: PGlite seed failed:', err.message);
+      process.exit(1);
+    });
+  "
 fi
 
-# Write StringCost proxy config directly into Claude Code settings.json so
-# it takes effect regardless of how the sandbox injects environment variables.
-if [ -n "\${STRINGCOST_PROXY_URL:-}" ]; then
+# Write StringCost proxy config — Claude Code only
+if [ "$OPENERAL_AGENT" != "openclaw" ] && [ -n "\${STRINGCOST_PROXY_URL:-}" ]; then
   node -e "
 const fs = require('fs');
 const file = '/home/agent/.claude/settings.json';
@@ -1792,25 +1898,61 @@ else
   trap "rm -f /tmp/openeral-bash.sock" EXIT
 fi
 
-# Install Claude Code if not already present in the image
-if ! command -v claude >/dev/null 2>&1; then
-  echo "setup: Claude CLI not found, installing (this may take a few minutes)..."
-  npm install -g @anthropic-ai/claude-code
-  if ! command -v claude >/dev/null 2>&1; then
-    echo "setup: ERROR: Claude CLI install failed" >&2
-    exit 1
+# --- Agent-specific install and launch ---
+if [ "$OPENERAL_AGENT" = "openclaw" ]; then
+  if ! command -v openclaw >/dev/null 2>&1; then
+    # OpenClaw should be baked into the sandbox image. This fallback runs only
+    # against older images that predate the bake. If you hit this branch, your
+    # image is stale — rebuild it to avoid a multi-minute install every launch.
+    echo "setup: OpenClaw not found in image — falling back to runtime install (slow)..." >&2
+    git config --global url."https://github.com/".insteadOf "ssh://git@github.com/"
+    git config --global --add url."https://github.com/".insteadOf "git@github.com:"
+    git config --global http.sslVerify false
+    SHARP_IGNORE_GLOBAL_LIBVIPS=1 npm install -g --loglevel=error openclaw@latest 2>&1 | tail -40
+    if ! command -v openclaw >/dev/null 2>&1; then
+      echo "setup: ERROR: OpenClaw install failed" >&2
+      exit 1
+    fi
   fi
-  echo "setup: Claude CLI installed"
+  echo "setup: launching OpenClaw..."
+  exec env HOME=/home/agent SHELL=/usr/local/bin/openeral-bash PATH="$PATH" openclaw "$@"
+else
+  if ! command -v claude >/dev/null 2>&1; then
+    echo "setup: Claude CLI not found, installing (this may take a few minutes)..."
+    npm install -g @anthropic-ai/claude-code
+    if ! command -v claude >/dev/null 2>&1; then
+      echo "setup: ERROR: Claude CLI install failed" >&2
+      exit 1
+    fi
+    echo "setup: Claude CLI installed"
+  fi
+  echo "setup: launching Claude Code..."
+  # Always strip ANTHROPIC_API_KEY — the sandbox uses the presign stored in
+  # ~/.claude/settings.json (written above). The raw API key must never reach
+  # Claude Code inside the sandbox or it will prompt the user to choose a key.
+  exec env -u ANTHROPIC_API_KEY HOME=/home/agent SHELL=/usr/local/bin/openeral-bash claude "$@"
 fi
-
-echo "setup: launching Claude Code..."
-# Always strip ANTHROPIC_API_KEY — the sandbox uses the presign stored in
-# ~/.claude/settings.json (written above). The raw API key must never reach
-# Claude Code inside the sandbox or it will prompt the user to choose a key.
-exec env -u ANTHROPIC_API_KEY HOME=/home/agent SHELL=/usr/local/bin/openeral-bash claude "$@"
 `;
 
-  sandboxArgs.push('--', 'bash', '-c', setupScript, '--', ...claudeArgs);
+  // openshell's gRPC exec endpoint rejects any argument containing newline or
+  // carriage return characters ("command argument N contains newline or carriage
+  // return characters"). Our setup script is inherently multi-line, so pass it
+  // base64-encoded and decode it inside the sandbox as a single-line command.
+  //
+  // `bash -s -- "$@"` forwards the outer bash's positional args into the
+  // decoded script, so agent args (e.g. `-p 'hello'`, `onboard`, `tui`) reach
+  // the final `exec … "$@"` inside the script.
+  // Decode the script to a temp file and execute it, rather than piping into
+  // `bash -s`. Piping into `bash -s` consumes the outer stdin (bash reads the
+  // script body from it), so when the script later does `exec <agent>`, the
+  // agent inherits a drained pipe as stdin instead of the TTY — interactive
+  // prompts (@clack/prompts etc.) see EOF and exit immediately. Writing the
+  // script to a file decouples script source from stdin, preserving the PTY
+  // for the final exec.
+  const setupScriptB64 = Buffer.from(setupScript, 'utf8').toString('base64');
+  const bootstrap =
+    `F=$(mktemp) && echo ${setupScriptB64} | base64 -d > "$F" && bash "$F" "$@"`;
+  sandboxArgs.push('--', 'bash', '-c', bootstrap, '--', ...agentArgs);
 
   // Pre-flight: verify DATABASE_URL is reachable from the host before launching.
   // A bad URL causes the migration step inside the sandbox to fail, which puts
@@ -1862,17 +2004,35 @@ exec env -u ANTHROPIC_API_KEY HOME=/home/agent SHELL=/usr/local/bin/openeral-bas
   // the secrets exist when the pod is scheduled.
   process.stderr.write('\x1b[2mopeneral: registering providers...\x1b[0m\n');
 
-  // claude provider — only needed when NOT using presign (injects ANTHROPIC_API_KEY).
-  // When a presign is in use, the sandbox authenticates via the presign URL written to
-  // ~/.claude/settings.json and ANTHROPIC_API_KEY must not be injected.
-  if (!stringcostUrl && process.env.ANTHROPIC_API_KEY) {
-    const claudeProvider = spawnSync('openshell', [
-      'provider', 'create', '--name', 'claude', '--type', 'generic', '--credential', 'ANTHROPIC_API_KEY',
-    ], { stdio: 'pipe', timeout: 30000 });
-    if (claudeProvider.status === 0) {
-      process.stderr.write('\x1b[32m✓ Claude provider registered\x1b[0m\n');
+  if (agent === 'claude') {
+    // claude provider — only needed when NOT using presign (injects ANTHROPIC_API_KEY).
+    // When a presign is in use, the sandbox authenticates via the presign URL written to
+    // ~/.claude/settings.json and ANTHROPIC_API_KEY must not be injected.
+    if (!stringcostUrl && process.env.ANTHROPIC_API_KEY) {
+      const claudeProvider = spawnSync('openshell', [
+        'provider', 'create', '--name', 'claude', '--type', 'generic', '--credential', 'ANTHROPIC_API_KEY',
+      ], { stdio: 'pipe', timeout: 30000 });
+      if (claudeProvider.status === 0) {
+        process.stderr.write('\x1b[32m✓ Claude provider registered\x1b[0m\n');
+      }
+      // Non-zero exit is expected when the provider already exists — that's fine.
     }
-    // Non-zero exit is expected when the provider already exists — that's fine.
+  } else {
+    // OpenClaw: register LLM API key providers directly
+    if (process.env.ANTHROPIC_API_KEY) {
+      spawnSync('openshell', ['provider', 'delete', '--name', 'anthropic'], { stdio: 'pipe', timeout: 10000 });
+      const p = spawnSync('openshell', [
+        'provider', 'create', '--name', 'anthropic', '--type', 'generic', '--credential', 'ANTHROPIC_API_KEY',
+      ], { stdio: 'pipe', timeout: 30000 });
+      if (p.status === 0) process.stderr.write('\x1b[32m✓ Anthropic provider registered\x1b[0m\n');
+    }
+    if (process.env.OPENAI_API_KEY) {
+      spawnSync('openshell', ['provider', 'delete', '--name', 'openai'], { stdio: 'pipe', timeout: 10000 });
+      const p = spawnSync('openshell', [
+        'provider', 'create', '--name', 'openai', '--type', 'generic', '--credential', 'OPENAI_API_KEY',
+      ], { stdio: 'pipe', timeout: 30000 });
+      if (p.status === 0) process.stderr.write('\x1b[32m✓ OpenAI provider registered\x1b[0m\n');
+    }
   }
 
   // db provider — injects DATABASE_URL into the sandbox (optional).
@@ -1897,8 +2057,9 @@ exec env -u ANTHROPIC_API_KEY HOME=/home/agent SHELL=/usr/local/bin/openeral-bas
     }
   }
 
+  const agentLabel = agent === 'openclaw' ? 'OpenClaw' : 'Claude Code';
   process.stderr.write(
-    `\x1b[2mopeneral: launching Claude Code in OpenShell sandbox (${workspaceId})...\x1b[0m\n` +
+    `\x1b[2mopeneral: launching ${agentLabel} in OpenShell sandbox (${workspaceId})...\x1b[0m\n` +
     `\x1b[2m  (if startup stalls for >3 min, press Ctrl+C and retry with OPENERAL_AUTO_FIX_TLS=1)\x1b[0m\n\n`,
   );
 
@@ -1952,8 +2113,22 @@ export async function main() {
   // Extract --dev/-d flag (must happen before subcommand dispatch so
   // `npx openeral --dev presign` works — the flag can appear anywhere before --)
   const devMode = ownRawArgs.some(a => a === '--dev' || a === '-d' || a === '-dev');
-  const ownArgs = ownRawArgs.filter(a => a !== '--dev' && a !== '-d' && a !== '-dev');
-  const args = [...ownArgs, ...passthroughPart];
+
+  // Strip --dev and --agent (+ its value) from own args before subcommand dispatch.
+  // --agent is passed through to parseCliArgs via args so it can set the agent field,
+  // but we also strip it here so it doesn't interfere with subcommand detection.
+  const ownArgs: string[] = [];
+  for (let i = 0; i < ownRawArgs.length; i++) {
+    if (ownRawArgs[i] === '--dev' || ownRawArgs[i] === '-d' || ownRawArgs[i] === '-dev') continue;
+    if (ownRawArgs[i] === '--agent' && i + 1 < ownRawArgs.length) { i++; continue; }
+    ownArgs.push(ownRawArgs[i]);
+  }
+  // Re-add --agent to args so parseCliArgs() can extract it
+  const agentIdx = ownRawArgs.indexOf('--agent');
+  const agentPart = agentIdx >= 0 && agentIdx + 1 < ownRawArgs.length
+    ? ['--agent', ownRawArgs[agentIdx + 1]]
+    : [];
+  const args = [...ownArgs, ...agentPart, ...passthroughPart];
 
   // presign show / renew
   if (ownArgs[0] === 'presign') {
@@ -2001,12 +2176,13 @@ export async function main() {
     process.exit(1);
   }
 
-  const { workspaceId, claudeArgs } = parsed;
+  const { workspaceId, agent, agentArgs } = parsed;
 
   process.stderr.write(`\x1b[2mopeneral: workspace  ${workspaceId}\x1b[0m\n`);
+  process.stderr.write(`\x1b[2mopeneral: agent      ${agent}\x1b[0m\n`);
   if (devMode) {
     const devImage = process.env.OPENERAL_DEV_IMAGE ?? 'openeral-sandbox:dev';
     process.stderr.write(`\x1b[2mopeneral: mode       dev (${devImage})\x1b[0m\n`);
   }
-  await launchViaSandbox(workspaceId, claudeArgs, devMode);
+  await launchViaSandbox(workspaceId, agentArgs, devMode, agent);
 }
