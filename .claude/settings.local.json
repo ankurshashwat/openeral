@@ -106,7 +106,19 @@
       "WebFetch(domain:clawtank.dev)",
       "WebFetch(domain:til.simonwillison.net)",
       "WebFetch(domain:entro.work)",
-      "WebFetch(domain:www.npmjs.com)"
+      "WebFetch(domain:www.npmjs.com)",
+      "Bash(bash -n /mnt/c/Users/dines/OneDrive/Desktop/work/openeral/sandboxes/openeral/setup.sh)",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)",
+      "Bash(git config *)",
+      "Bash(git *)",
+      "Bash(grep -v \"^[0-9]*:.*//.*$\")",
+      "Bash(npx tsc *)",
+      "Bash(npx vitest *)",
+      "Bash(bash -n tests/test_setup_e2e.sh)",
+      "Bash(tr -d '\\\\r')",
+      "Read(//tmp/**)",
+      "Bash(pnpm install *)"
     ]
   }
 }

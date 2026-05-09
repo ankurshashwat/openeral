@@ -161,39 +161,41 @@ export function parseCliArgs(args: string[]): ParsedArgs {
     }
   }
 
-  // Check for memory refresh command
-  if (args[0] === 'memory' && args[1] === 'refresh') {
-    let workspaceId = process.env.OPENERAL_WORKSPACE_ID || 'openeral-claude';
-    let projectRoot = '';
-    let query = '';
-    let dryRun = false;
-    let backup = true;
+  // Check for memory subcommands
+  if (args[0] === 'memory') {
+    if (args[1] === 'refresh') {
+      let workspaceId = process.env.OPENERAL_WORKSPACE_ID || 'openeral-claude';
+      let projectRoot = '';
+      let query = '';
+      let dryRun = false;
+      let backup = true;
 
-    for (let i = 2; i < args.length; i++) {
-      if ((args[i] === '--workspace' || args[i] === '-w') && args[i + 1]) {
-        workspaceId = args[++i];
-      } else if (args[i] === '--project-root' && args[i + 1]) {
-        projectRoot = args[++i];
-      } else if (args[i] === '--query' && args[i + 1]) {
-        query = args[++i];
-      } else if (args[i] === '--dry-run') {
-        dryRun = true;
-      } else if (args[i] === '--no-backup') {
-        backup = false;
+      for (let i = 2; i < args.length; i++) {
+        if ((args[i] === '--workspace' || args[i] === '-w') && args[i + 1]) {
+          workspaceId = args[++i];
+        } else if (args[i] === '--project-root' && args[i + 1]) {
+          projectRoot = args[++i];
+        } else if (args[i] === '--query' && args[i + 1]) {
+          query = args[++i];
+        } else if (args[i] === '--dry-run') {
+          dryRun = true;
+        } else if (args[i] === '--no-backup') {
+          backup = false;
+        }
       }
-    }
 
-    // Normalize workspace ID to be Kubernetes-compliant
-    const originalId = workspaceId;
-    workspaceId = workspaceId.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/^-+|-+$/g, '').replace(/-{2,}/g, '-');
-    
-    // Prevent empty workspace ID
-    if (workspaceId.length === 0) {
-      workspaceId = 'openeral-claude';
-      process.stderr.write(`\x1b[33mwarning: workspace ID "${originalId}" normalized to empty string, using default: ${workspaceId}\x1b[0m\n`);
-    }
+      // Normalize workspace ID to be Kubernetes-compliant
+      const originalId = workspaceId;
+      workspaceId = workspaceId.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/^-+|-+$/g, '').replace(/-{2,}/g, '-');
 
-    return { kind: 'memory-refresh', workspaceId, projectRoot, query, dryRun, backup };
+      // Prevent empty workspace ID
+      if (workspaceId.length === 0) {
+        workspaceId = 'openeral-claude';
+        process.stderr.write(`\x1b[33mwarning: workspace ID "${originalId}" normalized to empty string, using default: ${workspaceId}\x1b[0m\n`);
+      }
+
+      return { kind: 'memory-refresh', workspaceId, projectRoot, query, dryRun, backup };
+    }
   }
 
   // Default: launch mode
@@ -1426,7 +1428,7 @@ async function launchViaSandbox(workspaceId: string, claudeArgs: string[], devMo
     // The openclaw provider credential arrives inside the sandbox as an opaque
     // openshell:resolve:env:* placeholder that OpenClaw cannot use. Deliver the
     // real key by writing it to a temp file and uploading it as a file so
-    // setup.sh can write the actual value into ~/.openclaw/openclaw.json.
+    // setup.sh can export the actual value as ANTHROPIC_API_KEY before exec'ing openclaw.
     const anthropicKey = (process.env.ANTHROPIC_API_KEY ?? '').trim();
     if (!anthropicKey) {
       process.stderr.write(
