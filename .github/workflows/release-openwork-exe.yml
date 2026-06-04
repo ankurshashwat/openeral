@@ -25,7 +25,8 @@ name: Release OpenWork Windows EXE
 on:
   push:
     branches:
-      - just-bash, ci9/release
+      - just-bash
+      - ci9/release
     paths:
       - openwork/apps/app/**
       - openwork/apps/desktop/**
