@@ -156,5 +156,5 @@ jobs:
             Bundles the Ubuntu 24.04 + OpenShell WSL rootfs.
 
             **Note:** unsigned build — Windows SmartScreen may warn on first run.
-          files: openwork/apps/desktop/dist-electron/openwork-windows-*.exe
+          files: openwork/apps/desktop/dist-electron/openwork-win-*.exe
           fail_on_unmatched_files: true
