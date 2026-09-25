@@ -27,7 +27,7 @@ Openrind Desktop is designed around the idea that you can easily ship your agent
 
 ## Quick start
 
-Download the desktop app from [openrind-desktoplabs.com/download](https://openrind-desktoplabs.com/download), grab the latest [GitHub release](https://github.com/different-ai/openwork/releases), or install from source below.
+Download the desktop app from [openrind-desktoplabs.com/download](https://openrind-desktoplabs.com/download), grab the latest [GitHub release](https://github.com/openrind/openrind-shell/releases), or install from source below.
 
 - macOS and Linux downloads are available directly.
 - Windows access is currently handled through the paid support plan on [openrind-desktoplabs.com/pricing#windows-support](https://openrind-desktoplabs.com/pricing#windows-support).
@@ -239,3 +239,7 @@ Interested in using Openrind Desktop in your organization? We'd love to hear fro
 ## License
 
 MIT — see `LICENSE`.
+
+## Acknowledgments & Credits
+
+**Openrind Desktop** is built on top of and derived from [OpenWork](https://github.com/different-ai/openwork) by [Different AI](https://github.com/different-ai). We are deeply grateful to the OpenWork maintainers and contributors for creating the open-source foundation and architecture that made this project possible.

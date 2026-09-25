@@ -182,7 +182,7 @@ Specific User Requests
 }
 
 const ENTERPRISE_ARCHIVE_URL: &str =
-    "https://github.com/different-ai/openwork-enterprise/archive/refs/heads/main.zip";
+    "https://github.com/openrind/openrind-enterprise/archive/refs/heads/main.zip";
 const ENTERPRISE_SEED_MARKER: &str = ".openrind-desktop-enterprise-creators";
 static ENTERPRISE_SEED_IN_FLIGHT: LazyLock<Mutex<HashSet<String>>> =
     LazyLock::new(|| Mutex::new(HashSet::new()));

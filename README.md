@@ -451,3 +451,7 @@ remount the volume.
 Architecture and security details are in [ARCHITECTURE.md](./ARCHITECTURE.md). The
 alternatives survey and implementation contract are [FUSE.md](./FUSE.md) and
 [FUSE-DESIGN.md](./FUSE-DESIGN.md).
+
+## Acknowledgments & Credits
+
+**Openrind Shell** and **Openrind Desktop** are derived from and built on the foundations of [OpenWork](https://github.com/different-ai/openwork) by [Different AI](https://github.com/different-ai). We gratefully acknowledge and credit the upstream OpenWork project and its contributors.

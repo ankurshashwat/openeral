@@ -44,7 +44,7 @@ Openrind Desktop 围绕一个核心理念设计：让您可以轻松地将智能
 
 
 ## 快速开始
-在此处下载 dmg：https://github.com/different-ai/openwork/releases（或按照下面的说明从源代码安装）
+在此处下载 dmg：https://github.com/openrind/openrind-shell/releases（或按照下面的说明从源代码安装）
 
 ## 为什么选择 Openrind Desktop
 
@@ -197,3 +197,7 @@ WEBKIT_DISABLE_COMPOSITING_MODE=1 openrind-desktop
 ## 许可证
 
 MIT — 请参见 `LICENSE`。
+
+## 致谢与致敬
+
+**Openrind Desktop** 基于 [Different AI](https://github.com/different-ai) 的开源项目 [OpenWork](https://github.com/different-ai/openwork) 构建并派生。我们对 OpenWork 的维护者和贡献者表示诚挚的感谢，感谢他们为本项目提供的开源基础与架构支持。

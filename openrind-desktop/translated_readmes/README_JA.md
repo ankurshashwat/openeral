@@ -26,7 +26,7 @@ Openrind Desktopは、エージェントワークフローを再現可能なプ�
 
 ## クイックスタート
 
-デスクトップアプリを[openrind-desktoplabs.com/download](https://openrind-desktoplabs.com/download)からダウンロードするか、最新の[GitHubリリース](https://github.com/different-ai/openwork/releases)を取得するか、以下の手順でソースからインストールしてください。
+デスクトップアプリを[openrind-desktoplabs.com/download](https://openrind-desktoplabs.com/download)からダウンロードするか、最新の[GitHubリリース](https://github.com/openrind/openrind-shell/releases)を取得するか、以下の手順でソースからインストールしてください。
 
 - macOSおよびLinux向けのダウンロードが直接利用可能です。
 - Windowsへのアクセスは現在、[openrind-desktoplabs.com/pricing#windows-support](https://openrind-desktoplabs.com/pricing#windows-support)の有料サポートプランで提供されています。
@@ -231,3 +231,7 @@ WEBKIT_DISABLE_COMPOSITING_MODE=1 openrind-desktop
 ## ライセンス
 
 MIT — `LICENSE` をご確認ください。
+
+## 謝辞とクレジット
+
+**Openrind Desktop** は、[Different AI](https://github.com/different-ai) による [OpenWork](https://github.com/different-ai/openwork) をベースに構築・派生したプロジェクトです。本プロジェクトの基盤とアーキテクチャを提供してくださった OpenWork のメンテナーおよびコントリビューターの皆様に深く感謝いたします。
