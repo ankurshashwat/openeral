@@ -52,9 +52,12 @@ export function createMcpHttpHandler({ service, sdk, authority, serviceToken,
     const id = req.headers['mcp-session-id'];
     let record = id === undefined ? undefined : sessions.get(id);
     if (id !== undefined && (!record || record.token !== token || record.owner !== auth.owner ||
-        record.grantId !== auth.principal.grantId || record.expires <= Date.now())) return reply(res, 403);
+        record.grantId !== auth.principal.grantId || record.expires <= Date.now() || auth.principal.expiresAt <= Date.now())) return reply(res, 403);
     if (record && record.active >= 34) return reply(res, 429);
-    if (record) record.active++;
+    if (record) {
+      record.active++;
+      record.expires = Math.min(Date.now() + ttlMs, auth.principal.expiresAt);
+    }
     try {
       let body;
       if (req.method === 'POST') {
@@ -75,7 +78,9 @@ export function createMcpHttpHandler({ service, sdk, authority, serviceToken,
         catch { return reply(res, 400); }
       }
       // Reading a slow request must not extend a revoked/expired grant.
-      try { authenticate(token); } catch { return reply(res, 401); }
+      let freshAuth;
+      try { freshAuth = authenticate(token); } catch { return reply(res, 401); }
+      if (record) record.expires = Math.min(Date.now() + ttlMs, freshAuth.principal.expiresAt);
       if (!record) {
         if (req.method !== 'POST' || !sdk.isInitializeRequest(body)) return reply(res, 400);
         if (records.size >= maxSessions) return reply(res, 429);
@@ -115,8 +120,9 @@ export function createMcpHttpHandler({ service, sdk, authority, serviceToken,
   const timer = setInterval(() => {
     for (const record of records) {
       try {
-        if (Date.now() >= record.expires) throw new Error('expired');
-        authenticate(record.token);
+        const auth = authenticate(record.token);
+        if (record.active > 0) record.expires = Math.min(Date.now() + ttlMs, auth.principal.expiresAt);
+        if (Date.now() >= record.expires || Date.now() >= auth.principal.expiresAt) throw new Error('expired');
       } catch { void dispose(record); }
     }
   }, 1000);

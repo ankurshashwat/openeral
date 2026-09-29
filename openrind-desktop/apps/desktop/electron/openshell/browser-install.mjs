@@ -4,7 +4,7 @@ import { DISTRO_NAME, wslRun } from './wsl.mjs';
 // Host-only installation into the single running, managed FUSE container.
 // The agent never receives docker access, sudo, or an arbitrary root command.
 export async function installBrowserSandbox({ sandboxName, descriptor, networkPolicy }) {
-  if (typeof sandboxName !== 'string' || !/^[a-z0-9][a-z0-9_.-]{0,18}$/i.test(sandboxName)) throw new Error('Invalid browser sandbox');
+  if (typeof sandboxName !== 'string' || !/^[a-z0-9][a-z0-9_.-]+$/i.test(sandboxName)) throw new Error('Invalid browser sandbox');
   const effective = await runFuseOpenShell(['policy', 'get', sandboxName, '--full', '-o', 'json'],
     { ensure: false, timeout: 20_000 });
   if (effective.exitCode !== 0) throw new Error('Browser effective policy is unavailable');

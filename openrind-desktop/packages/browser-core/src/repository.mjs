@@ -1,5 +1,5 @@
 import { DatabaseSync } from 'node:sqlite';
-import { openSync, closeSync, unlinkSync, mkdirSync, writeFileSync } from 'node:fs';
+import { openSync, closeSync, unlinkSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { dirname, isAbsolute } from 'node:path';
 import { BrowserFault, failure } from '@openrind/browser-contract';
 
@@ -8,9 +8,39 @@ export class Repository {
     if (!isAbsolute(path)) throw new Error('Private absolute registry path required');
     this.clock = clock; this.path = path;
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-    // A stale lock fails closed. An operator may remove it only after proving
-    // the former worker has stopped; never guess from a recycled PID.
-    this.lock = openSync(`${path}.lock`, 'wx', 0o600);
+    const lockPath = `${path}.lock`;
+    let lock;
+    try {
+      lock = openSync(lockPath, 'wx', 0o600);
+    } catch (err) {
+      if (err.code === 'EEXIST') {
+        let reclaim = false;
+        try {
+          const content = readFileSync(lockPath, 'utf8');
+          const data = JSON.parse(content);
+          if (data && typeof data.pid === 'number') {
+            try {
+              process.kill(data.pid, 0);
+            } catch (killErr) {
+              if (killErr.code === 'ESRCH') {
+                reclaim = true;
+              }
+            }
+          }
+        } catch {
+          // Unreadable lock data is not reclaimed.
+        }
+        if (reclaim) {
+          try { unlinkSync(lockPath); } catch {}
+          lock = openSync(lockPath, 'wx', 0o600);
+        } else {
+          throw err;
+        }
+      } else {
+        throw err;
+      }
+    }
+    this.lock = lock;
     try {
       writeFileSync(this.lock, JSON.stringify({ pid: process.pid, startedAt: clock() }));
       this.db = new DatabaseSync(path);

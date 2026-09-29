@@ -14,13 +14,17 @@ export function createBrowserSessions({ runtime, installSandbox = installBrowser
     entry.retired = true;
     const failures = [];
     for (const lease of [...entry.leases]) {
+      if (!runtime.ready) {
+        entry.leases.delete(lease);
+        continue;
+      }
       try { await lease.stop(); } catch { failures.push(true); }
     }
     try { await entry.preparing; } catch { /* Preparation reports its own failure. */ }
     if (entry.provider) {
       try { await entry.provider.detach(); } catch { failures.push(true); }
     }
-    if (failures.length) throw new Error('Browser sandbox cleanup is incomplete');
+    if (failures.length && runtime.ready) throw new Error('Browser sandbox cleanup is incomplete');
   };
   return Object.freeze({
     async prepare({ sandboxName, scope, policy, onLost }) {
@@ -37,10 +41,14 @@ export function createBrowserSessions({ runtime, installSandbox = installBrowser
         })();
       }
       try { await entry.preparing; }
-      catch {
-        // Keep the entry for explicit retryable cleanup; never advertise ready.
+      catch (error) {
         entry.retired = true;
-        await entry.provider?.detach().catch(() => {});
+        try { await entry.provider?.detach().catch(() => {}); }
+        finally {
+          if (sandboxes.get(sandboxName) === entry) {
+            sandboxes.delete(sandboxName);
+          }
+        }
         throw new Error('Browser sandbox provisioning failed');
       }
       if (closed || entry.retired || !runtime.ready) throw new Error('Browser sandbox is unavailable');

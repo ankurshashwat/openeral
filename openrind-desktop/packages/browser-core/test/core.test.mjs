@@ -167,6 +167,43 @@ test('single-worker registry ownership fails closed', async t => {
   const { dir } = await setup(t);
   assert.throws(() => new Repository(join(dir, 'registry.sqlite')), /EEXIST/);
 });
+test('failed start releases profile lease', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'browser-core-lease-'));
+  const repo = new Repository(join(dir, 'registry.sqlite'));
+  let shouldFail = true;
+  const provider = fixtureProvider({
+    profile: 'host-retained',
+    create: async () => {
+      if (shouldFail) throw new Error('creation-failed');
+    },
+  });
+  const core = new BrowserCore({ repository: repo, providers: [provider], resolver });
+  t.after(async () => { await core.shutdown(); if (repo.db) repo.close(); await rm(dir, { recursive: true, force: true }); });
+  const grant = core.grants.issue(scope, { ...policy, profiles: ['profile_fail_test'] });
+  const failedStart = await core.call(grant.token, 'browser_start', {
+    provider: 'local-chromium', profileMode: 'host-retained', profileId: 'profile_fail_test', operationId: 'op_start_fail',
+  });
+  assert.equal(failedStart.ok, false);
+  shouldFail = false;
+  const retryStart = await core.call(grant.token, 'browser_start', {
+    provider: 'local-chromium', profileMode: 'host-retained', profileId: 'profile_fail_test', operationId: 'op_start_retry',
+  });
+  assert.equal(retryStart.ok, true);
+});
+test('stale lock file with dead PID is reclaimed', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'browser-core-lock-'));
+  const lockPath = join(dir, 'registry.sqlite.lock');
+  let unusedPid = 999999;
+  for (let pid = 80000; pid < 100000; pid++) {
+    try { process.kill(pid, 0); }
+    catch (e) { if (e.code === 'ESRCH') { unusedPid = pid; break; } }
+  }
+  const { writeFileSync } = await import('node:fs');
+  writeFileSync(lockPath, JSON.stringify({ pid: unusedPid, startedAt: Date.now() }));
+  const repo = new Repository(join(dir, 'registry.sqlite'));
+  t.after(async () => { repo.close(); await rm(dir, { recursive: true, force: true }); });
+  assert.ok(repo.db);
+});
 test('unapproved or private destinations never reach a provider', async t => {
   const { core, grant, page, provider } = await setup(t);
   assert.equal((await core.call(grant.token, 'browser_navigate', { ...page, operationId: 'op_bad_url', url: 'https://127.0.0.1' })).code, 'POLICY_DENIED');

@@ -817,8 +817,17 @@ function openOpenrindShellPtySession(opts) {
       if (queuedLive && !queuedLive.exitInfo) {
         return openrindPty.openSession({ sandboxName, cols, rows, extraEnv, agentSessionId, haloopContextId });
       }
-      const browserLease = prepareBrowserLease ? await prepareBrowserLease() : profile === 'openrind-shell-claude'
-        ? await browserController().prepare({ sandboxName, conversationId: haloopContextId }) : undefined;
+      let browserLease;
+      if (prepareBrowserLease) {
+        browserLease = await prepareBrowserLease();
+      } else if (profile === 'openrind-shell-claude') {
+        try {
+          browserLease = await browserController().prepare({ sandboxName, conversationId: haloopContextId });
+        } catch (error) {
+          console.warn('Browser runtime setup failed; proceeding without browser lease:', error);
+          browserLease = undefined;
+        }
+      }
       let ptyExited = false;
       let opened;
       try {
@@ -2822,7 +2831,9 @@ async function handleDesktopInvoke(event, command, ...args) {
               return openrindPty.closeSessionsForSandbox(name, "sandbox-delete");
             },
           });
-          await desktopBrowserController?.removeSandbox(name);
+          await desktopBrowserController?.removeSandbox(name).catch(error => {
+            console.warn('Browser controller cleanup failed for sandbox delete:', error);
+          });
           await openrindShell.deleteOpenrindShellSandbox(name);
           return result;
         })());

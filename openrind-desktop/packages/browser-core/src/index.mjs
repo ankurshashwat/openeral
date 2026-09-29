@@ -137,26 +137,47 @@ export class BrowserCore {
           op.state = 'dispatching'; this.repo.saveSession(session); this.repo.saveOperation(op);
           this.repo.audit('creating', session.id, op.id);
         });
-        const created = await this.bounded(session, op, context => provider.create(Object.freeze({
-          provider: args.provider, profileMode: args.profileMode, profileId: args.profileId, initialUrl: url,
-          allowedOrigins: [...auth.policy.origins], networkEnforcement: args.networkEnforcement }), context),
-          auth, signal, LIMITS.creationMs);
-        const capabilities = Capabilities.parse(created.capabilities);
-        if (capabilities.provider !== args.provider || canonical(capabilities) !== canonical(provider.capabilities)) throw new BrowserFault('BACKEND_UNAVAILABLE', 'unknown');
-        this.live.set(session.id, created);
-        session.resource = created.handle;
-        if (typeof session.resource !== 'string' || session.resource.length > 256 || session.resource.includes('://')) throw new BrowserFault('BACKEND_UNAVAILABLE', 'unknown');
-        // Persist identity before inspecting pages; a later crash can reconcile it.
-        this.repo.saveSession(session);
-        const pages = await this.bounded(session, op, () => created.pages(), auth, signal, this.actionMs);
-        if (!Array.isArray(pages) || !pages.length || pages.length > LIMITS.pages || new Set(pages.map(p => p.pageId)).size !== pages.length) throw new BrowserFault('BACKEND_UNAVAILABLE', 'unknown');
-        session.pages = pages.map(p => this.pageRecord(p));
-        session.driver = 'ready'; this.transition(session, 'Ready');
-        op.state = 'completed'; op.result = success(session, { ...this.publicSession(session), capabilities: publicCapabilities(capabilities) }, op.id);
-        this.repo.saveOperation(op); return op.result;
+        let created;
+        try {
+          created = await this.bounded(session, op, context => provider.create(Object.freeze({
+            provider: args.provider, profileMode: args.profileMode, profileId: args.profileId, initialUrl: url,
+            allowedOrigins: [...auth.policy.origins], networkEnforcement: args.networkEnforcement }), context),
+            auth, signal, LIMITS.creationMs);
+          const capabilities = Capabilities.parse(created.capabilities);
+          if (capabilities.provider !== args.provider || canonical(capabilities) !== canonical(provider.capabilities)) throw new BrowserFault('BACKEND_UNAVAILABLE', 'unknown');
+          this.live.set(session.id, created);
+          session.resource = created.handle;
+          if (typeof session.resource !== 'string' || session.resource.length > 256 || session.resource.includes('://')) throw new BrowserFault('BACKEND_UNAVAILABLE', 'unknown');
+          // Persist identity before inspecting pages; a later crash can reconcile it.
+          this.repo.saveSession(session);
+          const pages = await this.bounded(session, op, () => created.pages(), auth, signal, this.actionMs);
+          if (!Array.isArray(pages) || !pages.length || pages.length > LIMITS.pages || new Set(pages.map(p => p.pageId)).size !== pages.length) throw new BrowserFault('BACKEND_UNAVAILABLE', 'unknown');
+          session.pages = pages.map(p => this.pageRecord(p));
+          session.driver = 'ready'; this.transition(session, 'Ready');
+          op.state = 'completed'; op.result = success(session, { ...this.publicSession(session), capabilities: publicCapabilities(capabilities) }, op.id);
+          this.repo.saveOperation(op); return op.result;
+        } catch (innerError) {
+          if (created && !session.resource) {
+            try { await provider.close(created, 'revoked'); } catch {}
+          }
+          throw innerError;
+        }
       } catch (error) {
         if (session && op && this.repo.session(session.id)) {
-          session = this.repo.session(session.id); session.state = 'Uncertain'; session.driver = 'unknown'; session.epoch++;
+          session = this.repo.session(session.id); session.epoch++; session.driver = 'unknown';
+          if (!session.resource && !this.live.has(session.id)) {
+            session.state = 'Failed';
+            op.state = 'failed';
+            op.result = failure(error instanceof BrowserFault ? error : new BrowserFault('BACKEND_UNAVAILABLE', 'not-started'), op.id);
+            this.repo.transaction(() => {
+              this.repo.db.prepare('DELETE FROM leases WHERE session=?').run(session.id);
+              this.repo.saveSession(session);
+              this.repo.saveOperation(op);
+            });
+            this.repo.audit('failed', session.id, op.id);
+            return op.result;
+          }
+          session.state = 'Uncertain';
           op.state = 'unknown'; op.result = failure(new BrowserFault('OUTCOME_UNKNOWN', 'unknown'), op.id);
           this.repo.transaction(() => { this.repo.saveSession(session); this.repo.saveOperation(op); });
           return op.result;
@@ -228,6 +249,7 @@ export class BrowserCore {
           await live.page(args.pageId).close(ctx); fresh(); session.pages = session.pages.filter(p => p.id !== args.pageId); this.refs.invalidate(session.id, args.pageId); return { closed: true };
         }
         if (name === 'browser_navigate') {
+          page.origin = null;
           const result = await live.page(args.pageId).navigate(url, ctx);
           const destination = await validateDestination(result.url, auth.policy, this.resolver);
           fresh();
@@ -236,6 +258,17 @@ export class BrowserCore {
           return { url: destination.href, documentGeneration: page.generation };
         }
         if (name === 'browser_snapshot') {
+          if (session.state === 'Uncertain' || !page.origin || !auth.policy.origins.includes(page.origin)) {
+            const currentPages = await live.pages();
+            const current = currentPages.find(p => p.pageId === page.id);
+            if (!current?.url || current.url === 'about:blank') {
+              if (current?.url && current.url !== 'about:blank') throw new BrowserFault('POLICY_DENIED');
+            } else {
+              const destination = await validateDestination(current.url, auth.policy, this.resolver);
+              page.origin = destination.origin;
+            }
+          }
+          if (page.origin && !auth.policy.origins.includes(page.origin)) throw new BrowserFault('POLICY_DENIED');
           const raw = await live.page(args.pageId).snapshot(args, ctx);
           fresh();
           if (raw.documentGeneration < page.generation) throw new BrowserFault('STALE_REF');
@@ -283,6 +316,10 @@ export class BrowserCore {
       // completed website effect. Never replay based on provider error strings.
       session = this.repo.session(session.id); session.epoch++; session.driver = 'unknown';
       session.state = name === 'browser_close' ? 'CleanupPending' : 'Uncertain'; this.refs.invalidate(session.id);
+      if (name === 'browser_navigate' && args.pageId) {
+        const targetPage = session.pages.find(p => p.id === args.pageId);
+        if (targetPage) targetPage.origin = null;
+      }
       const result = failure(new BrowserFault('OUTCOME_UNKNOWN', 'unknown'), args.operationId);
       this.repo.transaction(() => { this.repo.saveSession(session); if (op) { op.state = 'unknown'; op.result = result; this.repo.saveOperation(op); }
         this.repo.audit('unknown', session.id, op?.id || null, 'OUTCOME_UNKNOWN'); });
@@ -322,7 +359,16 @@ export class BrowserCore {
       this.grants.assertActive(auth);
       const session = this.owned(auth, sessionId);
       if (!['Uncertain', 'Disconnected'].includes(session.state) || this.unsettled.has(sessionId)) throw new BrowserFault('ACTION_NOT_POSSIBLE');
-      if (!session.resource || !auth.policy.providers.includes(session.provider)) throw new BrowserFault('SESSION_LOST');
+      if (!session.resource || !auth.policy.providers.includes(session.provider)) {
+        if (!session.resource) {
+          session.state = 'Failed'; session.epoch++;
+          this.repo.transaction(() => {
+            this.repo.db.prepare('DELETE FROM leases WHERE session=?').run(session.id);
+            this.repo.saveSession(session);
+          });
+        }
+        throw new BrowserFault('SESSION_LOST');
+      }
       let live = this.live.get(sessionId);
       if (!live) {
         const provider = this.providers.get(session.provider);
@@ -362,6 +408,12 @@ export class BrowserCore {
     for (const owner of owners) this.disconnectOwner(owner);
     return await Promise.all(this.repo.sessions().filter(s => owners.has(s.owner) && !terminal.has(s.state)).map(async session => {
       const live = this.live.get(session.id);
+      if (!session.resource && !live && !this.unsettled.has(session.id)) {
+        session.state = 'Closed'; session.driver = 'closed';
+        this.repo.db.prepare('DELETE FROM leases WHERE session=?').run(session.id);
+        this.repo.saveSession(session);
+        return { sessionId: session.id, closed: true };
+      }
       // Never race close with an operation whose driver has not settled.
       if (!live || this.unsettled.has(session.id)) { session.state = 'CleanupPending'; this.repo.saveSession(session); return { sessionId: session.id, closed: false }; }
       try {
@@ -392,6 +444,10 @@ export class BrowserCore {
           this.repo.db.prepare('DELETE FROM leases WHERE session=?').run(session.id);
           this.repo.saveSession(session);
         } catch { /* Pending cleanup stays visible; no silent success. */ } finally { clearTimeout(timer); }
+      } else if (!session.resource && !live && !this.unsettled.has(session.id)) {
+        session.state = 'Closed'; session.driver = 'closed';
+        this.repo.db.prepare('DELETE FROM leases WHERE session=?').run(session.id);
+        this.repo.saveSession(session);
       }
       results.push({ sessionId: session.id, closed: session.state === 'Closed' });
     }
@@ -409,7 +465,10 @@ export class BrowserCore {
     const owners = [...new Set(this.repo.sessions().map(s => s.owner))];
     for (const owner of owners) this.disconnectOwner(owner);
     // Keep the registry open while uninterruptible callbacks may still settle.
-    if (this.unsettled.size) return { closed: false, pending: [...this.unsettled] };
+    if (this.unsettled.size) {
+      this.repo.close();
+      return { closed: false, pending: [...this.unsettled] };
+    }
     const result = [];
     for (const session of this.repo.sessions().filter(s => !terminal.has(s.state))) {
       const live = this.live.get(session.id);

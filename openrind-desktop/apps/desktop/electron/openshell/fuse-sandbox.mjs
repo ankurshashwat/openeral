@@ -257,13 +257,9 @@ async function prepareRequiredHaloop({
     haloopContextId,
     onProgress,
   });
-  const effectiveCredential =
-    runtime.endpoint && !runtime.endpoint.includes("host.openshell.internal") && !runtime.endpoint.includes("127.0.0.1")
-      ? anthropicApiKey
-      : runtime.clientToken;
   const provider = await ensureHaloopProvider(
     runtime.providerName,
-    effectiveCredential,
+    runtime.clientToken,
     onProgress,
   );
   return { ...runtime, replaced: Boolean(provider.replaced) };

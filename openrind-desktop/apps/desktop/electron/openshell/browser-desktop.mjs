@@ -16,7 +16,8 @@ export function createDesktopBrowserController({ resourcesPath, userDataPath, on
     if (!starting) {
       starting = startInstalledBrowserRuntime({ resourcesPath, databasePath: join(userDataPath, 'browser', 'registry.sqlite'),
         port: 18789, image: FUSE_IMAGE, onDisconnect: () => {
-          stopped = true;
+          starting = undefined;
+          sessions = undefined;
           onDisconnect?.();
         } }).then(async runtime => {
         if (stopped) { await runtime.close(); throw new Error('Desktop browser startup was cancelled'); }
@@ -45,6 +46,8 @@ export function createDesktopBrowserController({ resourcesPath, userDataPath, on
     async close() {
       stopped = true;
       if (starting) { const active = await starting.catch(() => null); await active?.close(); }
+      starting = undefined;
+      sessions = undefined;
     },
   });
 }
